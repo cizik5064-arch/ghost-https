@@ -8,15 +8,17 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Main {
+    // Настройки
     private static final int PORT = 26288;
     private static final String BIND_ADDRESS = "0.0.0.0";
-    private static final String PROXY_USER = "changeme";
-    private static final String PROXY_PASS = "changeme";
+    private static final String PROXY_USER = "dntNETWORK";
+    private static final String PROXY_PASS = "e3kTGCUizVPuLa7pBXK5gMEDbofZYhdJxjmr8NcQwFW2vy0I64nqs1RHSAlt9O";
     private static final int BUFFER_SIZE = 8192;
 
     private static final AtomicInteger activeConnections = new AtomicInteger(0);
-    private static final String EXPECTED_AUTH = "Basic " +
-            Base64.getEncoder().encodeToString((PROXY_USER + ":" + PROXY_PASS).getBytes());
+    private static final String AUTH_TOKEN = Base64.getEncoder()
+            .encodeToString((PROXY_USER + ":" + PROXY_PASS).getBytes());
+    private static final String EXPECTED_AUTH = "Basic " + AUTH_TOKEN;
 
     public static void main(String[] args) throws IOException {
         try (ServerSocket server = new ServerSocket()) {
@@ -24,7 +26,7 @@ public class Main {
             server.setReuseAddress(true);
 
             log("Proxy on " + BIND_ADDRESS + ":" + PORT);
-            log("Credentials: " + PROXY_USER + ":" + PROXY_PASS);
+            log("Login: " + PROXY_USER + " / Pass: " + PROXY_PASS);
 
             while (true) {
                 Socket client = server.accept();
@@ -42,9 +44,13 @@ public class Main {
             InputStream in = new BufferedInputStream(client.getInputStream(), BUFFER_SIZE);
             OutputStream out = new BufferedOutputStream(client.getOutputStream(), BUFFER_SIZE);
 
+            // Читаем первую строку
             String firstLine = readHttpLine(in);
             if (firstLine == null || firstLine.isEmpty()) return;
 
+            log("[" + clientIp + "] " + firstLine);
+
+            // Читаем ВСЕ заголовки в список
             List<String> headerLines = new ArrayList<>();
             String line;
             boolean authed = false;
@@ -52,12 +58,14 @@ public class Main {
             while ((line = readHttpLine(in)) != null && !line.isEmpty()) {
                 headerLines.add(line);
                 if (line.toLowerCase().startsWith("proxy-authorization:")) {
-                    if (line.substring(21).trim().equals(EXPECTED_AUTH)) {
+                    String authValue = line.substring(21).trim();
+                    if (authValue.equals(EXPECTED_AUTH)) {
                         authed = true;
                     }
                 }
             }
 
+            // Проверяем авторизацию
             if (!authed) {
                 out.write("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nContent-Length: 0\r\n\r\n".getBytes());
                 out.flush();
@@ -65,6 +73,7 @@ public class Main {
                 return;
             }
 
+            // Парсим хост и порт
             String host = null;
             int port = firstLine.startsWith("CONNECT") ? 443 : 80;
 
@@ -87,12 +96,11 @@ public class Main {
                 return;
             }
 
-            log("[" + clientIp + "] " + firstLine + " → " + host + ":" + port);
-
+            // Маршрутизируем
             if (firstLine.startsWith("CONNECT")) {
-                handleConnect(client, in, out, host, port);
+                handleConnect(client, in, out, host, port, clientIp);
             } else {
-                handleHttp(client, in, out, firstLine, headerLines, host, port);
+                handleHttp(client, in, out, firstLine, headerLines, host, port, clientIp);
             }
 
         } catch (IOException e) {
@@ -104,7 +112,9 @@ public class Main {
     }
 
     static void handleConnect(Socket client, InputStream clientIn, OutputStream clientOut,
-                              String host, int port) {
+                              String host, int port, String clientIp) {
+        log("[" + clientIp + "] CONNECT → " + host + ":" + port);
+
         try (Socket server = new Socket(host, port)) {
             server.setTcpNoDelay(true);
 
@@ -119,20 +129,25 @@ public class Main {
 
             c2s.join();
         } catch (Exception e) {
-            log("CONNECT failed: " + e.getMessage());
+            log("[" + clientIp + "] CONNECT failed: " + e.getMessage());
         }
     }
 
     static void handleHttp(Socket client, InputStream clientIn, OutputStream clientOut,
                            String firstLine, List<String> headers,
-                           String host, int port) throws IOException {
+                           String host, int port, String clientIp) throws IOException {
+        log("[" + clientIp + "] HTTP → " + host + ":" + port);
+
+        // Собираем запрос
         StringBuilder request = new StringBuilder();
         request.append(firstLine).append("\r\n");
 
         long contentLength = 0;
         for (String h : headers) {
+            // Пропускаем прокси-авторизацию при отправке на целевой сервер
             if (h.toLowerCase().startsWith("proxy-authorization:")) continue;
             request.append(h).append("\r\n");
+
             if (h.toLowerCase().startsWith("content-length:")) {
                 contentLength = Long.parseLong(h.substring(15).trim());
             }
@@ -146,6 +161,7 @@ public class Main {
 
             serverOut.write(request.toString().getBytes());
 
+            // Тело запроса
             if (contentLength > 0) {
                 byte[] buf = new byte[BUFFER_SIZE];
                 long remaining = contentLength;
@@ -161,7 +177,7 @@ public class Main {
             transfer(serverIn, clientOut);
             clientOut.flush();
         } catch (IOException e) {
-            log("HTTP failed: " + e.getMessage());
+            log("[" + clientIp + "] HTTP failed: " + e.getMessage());
         }
     }
 
@@ -181,7 +197,7 @@ public class Main {
     }
 
     private static String readHttpLine(InputStream in) throws IOException {
-        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
         int prev = -1;
         int ch;
         while ((ch = in.read()) != -1) {
